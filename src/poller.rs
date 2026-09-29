@@ -1703,21 +1703,13 @@ fn format_countdown_from_secs(total_secs: u64, strings: Strings) -> String {
 }
 
 fn time_until_display_change_from_secs(total_secs: u64) -> Duration {
-    let total_mins = total_secs / 60;
-    let total_hours = total_secs / 3600;
-    let total_days = total_secs / 86400;
-
-    let current_bucket_start = if total_days >= 1 {
-        total_days * 86400
-    } else if total_hours >= 1 {
-        total_hours * 3600
-    } else if total_mins >= 1 {
-        total_mins * 60
+    if total_secs >= 60 {
+        // 表示している「分」が変わる瞬間に更新
+        Duration::from_secs(total_secs % 60 + 1)
     } else {
-        total_secs
-    };
-
-    Duration::from_secs(total_secs.saturating_sub(current_bucket_start) + 1)
+        // リセット直前
+        Duration::from_secs(total_secs.max(1))
+    }
 }
 
 /// Returns true if either section has reached "now" (reset time has passed).

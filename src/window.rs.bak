@@ -256,22 +256,14 @@ fn spawn_taskbar_watchdog() {
             continue;
         };
         let taskbars = native_interop::find_taskbars();
-
-        let old_taskbar_gone =
-	    !taskbars.iter().any(|taskbar| taskbar.hwnd == old);
-	
-	let secondary_available =
- 	    taskbars.iter().any(|taskbar| is_secondary_taskbar(taskbar.hwnd));
-
-	let should_move_to_secondary =
-	    secondary_available && !is_secondary_taskbar(old);
-
-	if !taskbars.is_empty() && (old_taskbar_gone || should_move_to_secondary) {
-	    diagnose::log("preferred taskbar changed -> relaunching");
-	    relaunch_self();
-}
-
-
+        if !taskbars.is_empty() && !taskbars.iter().any(|taskbar| taskbar.hwnd == old) {
+            let new = taskbars[0].hwnd;
+            diagnose::log(format!(
+                "watchdog: taskbar changed old={:?} new={:?} -> relaunching",
+                old.0, new.0
+            ));
+            relaunch_self();
+        }
     });
 }
 
@@ -780,21 +772,6 @@ fn toggle_widget_visibility(hwnd: HWND) {
     }
 }
 
-fn is_secondary_taskbar(hwnd: HWND) -> bool {
-    let mut class_name = [0u16; 64];
-
-    let len = unsafe { GetClassNameW(hwnd, &mut class_name) };
-
-    if len == 0 {
-        return false;
-    }
-
-    let class_name =
-        String::from_utf16_lossy(&class_name[..len as usize]);
-
-    class_name == "Shell_SecondaryTrayWnd"
-}
-
 fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
     let taskbars = native_interop::find_taskbars();
     if taskbars.is_empty() {
@@ -802,14 +779,7 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         return false;
     }
 
-    let fallback_index =
-    requested_index.min(taskbars.len().saturating_sub(1));
-
-    let index = taskbars
-    .iter()
-    .position(|taskbar| is_secondary_taskbar(taskbar.hwnd))
-    .unwrap_or(fallback_index);
-
+    let index = requested_index.min(taskbars.len().saturating_sub(1));
     let taskbar = taskbars[index];
     diagnose::log(format!(
         "taskbar selected index={index} count={} hwnd={:?} rect=({}, {}, {}, {})",
@@ -942,43 +912,6 @@ fn schedule_auto_update_check(hwnd: HWND) {
     }
 }
 
-fn format_japanese_codex_line(
-    section: &crate::models::UsageSection,
-    window: poller::UsageWindowKind,
-) -> String {
-    let remaining = poller::remaining_percentage(section.percentage);
-
-    let Some(reset) = section.resets_at else {
-        return format!("残り{remaining:.0}%");
-    };
-
-    let Ok(duration) = reset.duration_since(SystemTime::now()) else {
-        return format!("残り{remaining:.0}% · あと0h0m");
-    };
-
-    let secs = duration.as_secs();
-
-    let countdown = match window {
-        poller::UsageWindowKind::Session => {
-            let total_minutes = secs / 60;
-            let hours = total_minutes / 60;
-            let minutes = total_minutes % 60;
-
-            format!("あと{hours}時間{minutes:02}分")
-        }
-
-        poller::UsageWindowKind::Weekly => {
-            let total_hours = secs / 3600;
-            let days = total_hours / 24;
-            let hours = total_hours % 24;
-
-            format!("あと{days}日{hours:02}時間")
-        }
-    };
-
-    format!("残り{remaining:.0}% · {countdown}")
-}
-
 fn refresh_usage_texts(state: &mut AppState) {
     if !state.last_poll_ok {
         return;
@@ -1009,16 +942,6 @@ fn refresh_usage_texts(state: &mut AppState) {
     }
 
     if let Some(codex) = data.codex.as_ref() {
-    if state.language == LanguageId::Japanese {
-        state.codex_session_text = format_japanese_codex_line(
-            &codex.session,
-            poller::UsageWindowKind::Session,
-        );
-        state.codex_weekly_text = format_japanese_codex_line(
-            &codex.weekly,
-            poller::UsageWindowKind::Weekly,
-        );
-    } else {
         state.codex_session_text = poller::format_line(
             &codex.session,
             strings,
@@ -1031,11 +954,10 @@ fn refresh_usage_texts(state: &mut AppState) {
             show_remaining,
             poller::UsageWindowKind::Weekly,
         );
+    } else if state.show_codex {
+        state.codex_session_text = "!".to_string();
+        state.codex_weekly_text = "!".to_string();
     }
-} else if state.show_codex {
-    state.codex_session_text = "!".to_string();
-    state.codex_weekly_text = "!".to_string();
-}
 
     if let Some(antigravity) = data.antigravity.as_ref() {
         state.antigravity_session_text = poller::format_line(
@@ -1490,13 +1412,11 @@ const SEGMENT_GAP: i32 = 1;
 const SEGMENT_COUNT: i32 = 10;
 
 const LEFT_DIVIDER_W: i32 = 3;
-const PREFERRED_X_FROM_LEFT: i32 = 135;
 const DIVIDER_RIGHT_MARGIN: i32 = 10;
 const LABEL_WIDTH: i32 = 18;
 const LABEL_RIGHT_MARGIN: i32 = 10;
 const BAR_RIGHT_MARGIN: i32 = 4;
 const TEXT_WIDTH: i32 = 62;
-const JAPANESE_TEXT_WIDTH: i32 = 150;
 const SIMPLIFIED_CHINESE_LABEL_WIDTH: i32 = 20;
 const SIMPLIFIED_CHINESE_TEXT_WIDTH: i32 = 126;
 const MODEL_RIGHT_MARGIN: i32 = 3;
@@ -1540,18 +1460,13 @@ fn usage_layout_widths(language: LanguageId) -> (i32, i32) {
             SIMPLIFIED_CHINESE_LABEL_WIDTH,
             SIMPLIFIED_CHINESE_TEXT_WIDTH,
         )
-    } else if language == LanguageId::Japanese {
-        (LABEL_WIDTH, JAPANESE_TEXT_WIDTH)
     } else {
         (LABEL_WIDTH, TEXT_WIDTH)
     }
 }
 
 fn usage_percent_for_display(language: LanguageId, used_percentage: f64) -> f64 {
-    if matches!(
-        language,
-        LanguageId::SimplifiedChinese | LanguageId::Japanese
-    ) {
+    if language == LanguageId::SimplifiedChinese {
         poller::remaining_percentage(used_percentage)
     } else {
         used_percentage.clamp(0.0, 100.0)
@@ -1607,9 +1522,9 @@ fn claude_accent_color() -> Color {
 
 fn codex_accent_color(is_dark: bool) -> Color {
     if is_dark {
-        Color::from_hex("#4CC2FF")
+        Color::from_hex("#F5F5F5")
     } else {
-        Color::from_hex("#0078D4")
+        Color::from_hex("#1F1F1F")
     }
 }
 
@@ -2688,11 +2603,7 @@ fn position_at_taskbar() {
 
     let widget_width = total_widget_width();
     let max_offset = (tray_left - taskbar_rect.left - widget_width).max(0);
-
-    let desired_x = sc(PREFERRED_X_FROM_LEFT);
-    let tray_offset =
-    (tray_left - taskbar_rect.left - widget_width - desired_x)
-        .clamp(0, max_offset);
+    let tray_offset = tray_offset.clamp(0, max_offset);
     let offset_changed = {
         let mut state = lock_state();
         if let Some(s) = state.as_mut() {
