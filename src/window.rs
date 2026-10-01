@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::Write;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2312,6 +2316,91 @@ fn poll_error_display_label(error: poller::PollError, language: LanguageId) -> &
     }
 }
 
+fn log_codex_usage(data: &AppUsageData) {
+    let Some(codex) = data.codex.as_ref() else {
+        return;
+    };
+
+    let now = SystemTime::now();
+
+    let timestamp_unix = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let local_time = native_interop::system_time_to_local(now)
+        .map(|t| {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                t.wYear,
+                t.wMonth,
+                t.wDay,
+                t.wHour,
+                t.wMinute,
+                t.wSecond
+            )
+        })
+        .unwrap_or_default();
+
+    let remaining_5h =
+        poller::remaining_percentage(codex.session.percentage);
+
+    let remaining_7d =
+        poller::remaining_percentage(codex.weekly.percentage);
+
+    let reset_5h = codex
+        .session
+        .resets_at
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+
+    let reset_7d = codex
+        .weekly
+        .resets_at
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+
+    let base_dir = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("CodexUsage");
+
+    if create_dir_all(&base_dir).is_err() {
+        return;
+    }
+
+    let csv_path = base_dir.join("usage_history.csv");
+    let new_file = !csv_path.exists();
+
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(csv_path)
+    else {
+        return;
+    };
+
+    if new_file {
+        let _ = writeln!(
+            file,
+            "timestamp_unix,local_time,remaining_5h_pct,remaining_7d_pct,reset_5h_unix,reset_7d_unix"
+        );
+    }
+
+    let _ = writeln!(
+        file,
+        "{},{},{:.2},{:.2},{},{}",
+        timestamp_unix,
+        local_time,
+        remaining_5h,
+        remaining_7d,
+        reset_5h,
+        reset_7d
+    );
+}
+
 fn do_poll(send_hwnd: SendHwnd) {
     let hwnd = send_hwnd.to_hwnd();
     let (show_claude_code, show_codex, show_antigravity) = {
@@ -2324,6 +2413,7 @@ fn do_poll(send_hwnd: SendHwnd) {
 
     match poller::poll(show_claude_code, show_codex, show_antigravity) {
         Ok(data) => {
+            log_codex_usage(&data);
             let mut state = lock_state();
             let mut quota_alerts = Vec::new();
             if let Some(s) = state.as_mut() {
